@@ -14,9 +14,9 @@ Specifications for the client:
 
 * Command line utility.
 * Receives three parameters
-* * Full path to the file to send
-* * Destination IP
-* * Destination Port
+  * Full path to the file to send
+  * Destination IP
+  * Destination Port
 * Prints out to standard output each file sent including the bytes sent.
 * Prints out to standard error any errors.
 * Written in ANSI C 99
@@ -27,9 +27,9 @@ Specifications for the server:
 * Command line utility.
 * No multithreaded/concurrency required.
 * Receives three parameters:
-* * Folder where the received files will be stored.
-* * Listening IP
-* * Listening Port
+  * Folder where the received files will be stored.
+  * Listening IP
+  * Listening Port
 * Preserves the original name of the received file but not the path.
 * Prints out to standard output each file reception including the file name and its size.
 * Prints out to standard error any errors.
