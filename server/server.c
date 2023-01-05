@@ -58,6 +58,7 @@ int start_listening(ConnectionParameters*, SocketHandle, struct sockaddr_in*);
 void initialize_client_sockets(ClientParameters client_socket[]);
 void bind_socket_listener(ConnectionParameters*, int, struct sockaddr_in*);
 void append_data_file(const char* filename, const char* data);
+char *format_bytes(size_t bytes);
 
 int main(int argc, char* argv[])
 {
@@ -213,14 +214,6 @@ int start_listening(ConnectionParameters* parameters, SocketHandle master_socket
             printf("New connection , socket fd is %d , ip is : %s , port : %d\n",
                 new_socket, inet_ntoa(address->sin_addr), ntohs(address->sin_port));
 
-            //send new connection greeting message
-            if (send(new_socket, welcome_message, strlen(welcome_message), 0) != strlen(welcome_message))
-            {
-                perror("send");
-            }
-
-            puts("Welcome message sent successfully");
-
             //add new socket to array of sockets
             for (i = 0; i < MAX_CLIENTS; i++)
             {
@@ -252,7 +245,9 @@ int start_listening(ConnectionParameters* parameters, SocketHandle master_socket
                     //Close the socket and mark as 0 in list for reuse
                     close(socket_descriptor);
 
-                    fprintf(stdout, "File received: %s of size %d\n", client_parameter[i].File, client_parameter[i].FileSize);
+                    char* file_size = format_bytes(client_parameter[i].FileSize);
+                    fprintf(stdout, "File received: %s of size %s\n", client_parameter[i].File, file_size);
+                    free(file_size);
 
                     client_parameter[i].Socket = 0;
                     client_parameter[i].Status = Disconnected;
@@ -328,4 +323,36 @@ void append_data_file(const char* filename, const char* data)
     fwrite(data, 1, strlen(data), file);
 
     fclose(file);
+}
+
+char *format_bytes(size_t bytes)
+{
+    if (bytes < 1024)
+    {
+        // less than 1 KB, just return the number of bytes
+        char *result = malloc(32);
+        snprintf(result, 32, "%zu bytes", bytes);
+        return result;
+    }
+    else if (bytes < 1048576)
+    {
+        // less than 1 MB, return the number of KB
+        char *result = malloc(32);
+        snprintf(result, 32, "%.2f KB", (float) bytes / 1024.0);
+        return result;
+    }
+    else if (bytes < 1073741824)
+    {
+        // less than 1 GB, return the number of MB
+        char *result = malloc(32);
+        snprintf(result, 32, "%.2f MB", (float) bytes / 1048576.0);
+        return result;
+    }
+    else
+    {
+        // more than 1 GB, return the number of GB
+        char *result = malloc(32);
+        snprintf(result, 32, "%.2f GB", (float) bytes / 1073741824.0);
+        return result;
+    }
 }

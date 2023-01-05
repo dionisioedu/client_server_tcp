@@ -41,3 +41,14 @@ Deliverables:
 * Code (or git)
 * Live demo
 * Walkthrough, Q&A session
+
+
+Build and Run
+
+Server:
+-Enter the server folder and type the following command:
+> gcc server.c -o server && ./server [folder name]/ [your ip address] [port number]
+
+Client:
+-Enter the client folder and type the folloing command:
+> gcc client.c -o client && ./client [file name] [destination ip] [destination port]
