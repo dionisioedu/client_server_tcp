@@ -8,9 +8,14 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <sys/time.h>
+#include <sys/stat.h>
 
-#define TRUE   1
-#define FALSE  0
+#define TRUE 1
+#define FALSE 0
+#define BUFFSIZE 1024
+#define TOTAL_PARAMETERS 3
+#define MAX_CLIENTS 30
+#define MAX_PENDING_CONNECTIONS 3
 
 enum Parameters {
     FolderParameter = 1,
@@ -18,41 +23,87 @@ enum Parameters {
     ListeningPortParameter,
 };
 
+typedef enum _ConnectionStatus {
+    Disconnected = 0,
+    Connected = 1,
+    FileNameReceived,
+    ReceivingFile,
+    Error,
+    ReceivedFile,
+    Completed,
+} ConnectionStatus;
+
+typedef int SocketHandle;
+
 typedef struct _ConnectionParameters {
     char* Folder;
     char* ListeningIp;
     int ListeningPort;
 } ConnectionParameters;
 
-const int TotalParameters = 3;
+typedef struct _ClientParameters {
+    char* File;
+    int FileSize;
+    SocketHandle Socket;
+    ConnectionStatus Status;
+} ClientParameters;
 
+const static char* welcome_message = "TCP Server v1.0 \r\n";
+
+void create_folder(const char* folder);
+int configure_parameters(ConnectionParameters*, char* argv[]);
 void show_parameters(ConnectionParameters*);
-int start_listening(ConnectionParameters*);
+SocketHandle prepare_sockets(ConnectionParameters*, struct sockaddr_in*);
+int start_listening(ConnectionParameters*, SocketHandle, struct sockaddr_in*);
+void initialize_client_sockets(ClientParameters client_socket[]);
+void bind_socket_listener(ConnectionParameters*, int, struct sockaddr_in*);
+void append_data_file(const char* filename, const char* data);
 
 int main(int argc, char* argv[])
 {
     printf("Server TCP\n==========\n");
 
-    if (argc != TotalParameters + 1)
+    if (argc != TOTAL_PARAMETERS + 1)
     {
-        printf("Invalid parameters!\n[FOLDER] [LISTENING IP] [LISTENING PORT]\n");
+        fprintf(stderr, "Invalid parameters!\n[FOLDER] [LISTENING IP] [LISTENING PORT]\n");
         exit(EXIT_FAILURE);
     }
 
     ConnectionParameters parameters;
-    parameters.Folder = argv[FolderParameter];
-    parameters.ListeningIp = argv[ListeningIPParameter];
-    parameters.ListeningPort = atoi(argv[ListeningPortParameter]);
-
-    if (parameters.ListeningPort <= 0)
+    if (configure_parameters(&parameters, argv) < 0)
     {
-        printf("Invalid listening port!\n");
         exit(EXIT_FAILURE);
     }
 
     show_parameters(&parameters);
 
-    return start_listening(&parameters);
+    create_folder(parameters.Folder);
+
+    struct sockaddr_in address;
+    SocketHandle master_socket = prepare_sockets(&parameters, &address);
+
+    return start_listening(&parameters, master_socket, &address);
+}
+
+int configure_parameters(ConnectionParameters* parameters, char* argv[])
+{
+    parameters->Folder = argv[FolderParameter];
+    parameters->ListeningIp = argv[ListeningIPParameter];
+    parameters->ListeningPort = atoi(argv[ListeningPortParameter]);
+
+    if (strlen(parameters->Folder) < 1)
+    {
+        fprintf(stderr, "Folder must be at least 1 character!\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (parameters->ListeningPort <= 0)
+    {
+        fprintf(stderr, "Invalid listening port!\n");
+        return -1;
+    }
+
+    return 0;
 }
 
 void show_parameters(ConnectionParameters* parameters)
@@ -63,25 +114,25 @@ void show_parameters(ConnectionParameters* parameters)
     printf("Listening port: %d\n", parameters->ListeningPort);
 }
 
-int start_listening(ConnectionParameters* parameters)
+void create_folder(const char* folder)
+{
+    struct stat st;
+    int result = stat(folder, &st);
+    if (result == 0 && S_ISDIR(st.st_mode)) {
+        return;
+    }
+
+    result = mkdir(folder, 0777);
+    if (result != 0) {
+        perror("mkdir failed");
+        exit(EXIT_FAILURE);
+    }
+}
+
+SocketHandle prepare_sockets(ConnectionParameters* parameters, struct sockaddr_in* address)
 {
     int opt = TRUE;
-    int master_socket, addrlen, new_socket, client_socket[30], max_clients = 30, activity, i, valread, sd;
-    int max_sd;
-
-    struct sockaddr_in address;
-
-    char buffer[1024 + 1];
-
-    //set of socket descriptors
-    fd_set readfds;
-
-    char *message = "TCP Server v1.0 \r\n";
-
-    for (i = 0; i < max_clients; i++)
-    {
-        client_socket[i] = 0;
-    }
+    SocketHandle master_socket;
 
     if ((master_socket = socket(AF_INET , SOCK_STREAM , 0)) == 0)
     {
@@ -89,89 +140,81 @@ int start_listening(ConnectionParameters* parameters)
         exit(EXIT_FAILURE);
     }
 
-    if (setsockopt(master_socket, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof(opt)) < 0)
+    if (setsockopt(master_socket, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt)) < 0)
     {
         perror("setsockopt");
         exit(EXIT_FAILURE);
     }
 
-    struct in_addr ip_address;
+    bind_socket_listener(parameters, master_socket, address);
 
-    // convert the IP address string to a struct in_addr
-    inet_aton(parameters->ListeningIp, &ip_address);
-
-    address.sin_family = AF_INET;
-    address.sin_addr = ip_address;
-    address.sin_port = htons(parameters->ListeningPort);
-
-    if (bind(master_socket, (struct sockaddr *)&address, sizeof(address))<0)
-    {
-        perror("bind failed");
-        exit(EXIT_FAILURE);
-    }
-
-    printf("Listener on port %d \n", parameters->ListeningPort);
-
-    //try to specify maximum of 3 pending connections for the master socket
-    if (listen(master_socket, 3) < 0)
+    if (listen(master_socket, MAX_PENDING_CONNECTIONS) < 0)
     {
         perror("listen");
         exit(EXIT_FAILURE);
     }
 
-    //accept the incoming connection
-    addrlen = sizeof(address);
     puts("Waiting for connections...");
+
+    return master_socket;
+}
+
+int start_listening(ConnectionParameters* parameters, SocketHandle master_socket, struct sockaddr_in* address)
+{
+    fd_set readfds;
+    int socket_descriptor;
+    int max_sd;
+    int i;
+    int activity;
+    int valread;
+    SocketHandle new_socket;
+    ClientParameters client_parameter[MAX_CLIENTS];
+    char buffer[BUFFSIZE + 1];
+
+    int addrlen = sizeof(struct sockaddr_in);
+
+    initialize_client_sockets(client_parameter);
 
     while (TRUE)
     {
-        //clear the socket set
         FD_ZERO(&readfds);
 
-        //add master socket to set
         FD_SET(master_socket, &readfds);
         max_sd = master_socket;
 
-        //add child sockets to set
-        for (i = 0; i < max_clients; i++)
+        for (i = 0; i < MAX_CLIENTS; i++)
         {
-            //socket descriptor
-            sd = client_socket[i];
+            socket_descriptor = client_parameter[i].Socket;
 
-            //if valid socket descriptor then add to read list
-            if (sd > 0)
-                FD_SET( sd , &readfds);
+            if (socket_descriptor > 0)
+                FD_SET(socket_descriptor , &readfds);
 
-            //highest file descriptor number, need it for the select function
-            if (sd > max_sd)
-                max_sd = sd;
+            if (socket_descriptor > max_sd)
+                max_sd = socket_descriptor;
         }
 
-        //wait for an activity on one of the sockets , timeout is NULL ,
-        //so wait indefinitely
         activity = select(max_sd + 1, &readfds, NULL, NULL, NULL);
 
         if ((activity < 0) && (errno != EINTR))
         {
-            printf("select error");
+            perror("select error");
         }
 
-        //If something happened on the master socket ,
-        //then its an incoming connection
+
         if (FD_ISSET(master_socket, &readfds))
         {
-            if ((new_socket = accept(master_socket, (struct sockaddr*)&address, (socklen_t*)&addrlen)) < 0)
+            if ((new_socket = accept(master_socket, (struct sockaddr*)address, (socklen_t*)&addrlen)) < 0)
             {
                 perror("accept");
                 exit(EXIT_FAILURE);
             }
 
             //inform user of socket number - used in send and receive commands
-            printf("New connection , socket fd is %d , ip is : %s , port : %d\n" , new_socket , inet_ntoa(address.sin_addr) , ntohs
-                  (address.sin_port));
+            printf("New connection , socket fd is %d , ip is : %s , port : %d\n",
+                new_socket, inet_ntoa(address->sin_addr), ntohs(address->sin_port));
 
             //send new connection greeting message
-            if (send(new_socket, message, strlen(message), 0) != strlen(message))
+            if (send(new_socket, welcome_message, strlen(welcome_message), 0) != strlen(welcome_message))
             {
                 perror("send");
             }
@@ -179,12 +222,13 @@ int start_listening(ConnectionParameters* parameters)
             puts("Welcome message sent successfully");
 
             //add new socket to array of sockets
-            for (i = 0; i < max_clients; i++)
+            for (i = 0; i < MAX_CLIENTS; i++)
             {
                 //if position is empty
-                if (client_socket[i] == 0)
+                if (client_parameter[i].Socket == 0)
                 {
-                    client_socket[i] = new_socket;
+                    client_parameter[i].Socket = new_socket;
+                    client_parameter[i].Status = Connected;
                     printf("Adding to list of sockets as %d\n" , i);
 
                     break;
@@ -192,37 +236,96 @@ int start_listening(ConnectionParameters* parameters)
             }
         }
 
-        //else its some IO operation on some other socket
-        for (i = 0; i < max_clients; i++)
+        for (i = 0; i < MAX_CLIENTS; i++)
         {
-            sd = client_socket[i];
+            socket_descriptor = client_parameter[i].Socket;
 
-            if (FD_ISSET(sd, &readfds))
+            if (FD_ISSET(socket_descriptor, &readfds))
             {
-                //Check if it was for closing , and also read the
-                //incoming message
-                if ((valread = read(sd, buffer, 1024)) == 0)
+                if ((valread = read(socket_descriptor, buffer, BUFFSIZE)) == 0)
                 {
                     //Somebody disconnected , get his details and print
-                    getpeername(sd , (struct sockaddr*)&address , (socklen_t*)&addrlen);
+                    getpeername(socket_descriptor , (struct sockaddr*)address , (socklen_t*)&addrlen);
                     printf("Host disconnected , ip %s , port %d \n",
-                          inet_ntoa(address.sin_addr) , ntohs(address.sin_port));
+                          inet_ntoa(address->sin_addr) , ntohs(address->sin_port));
 
                     //Close the socket and mark as 0 in list for reuse
-                    close(sd);
-                    client_socket[i] = 0;
+                    close(socket_descriptor);
+
+                    fprintf(stdout, "File received: %s of size %d\n", client_parameter[i].File, client_parameter[i].FileSize);
+
+                    client_parameter[i].Socket = 0;
+                    client_parameter[i].Status = Disconnected;
+                    free(client_parameter[i].File);
+                    client_parameter[i].FileSize = 0;
                 }
-                //Echo back the message that came in
                 else
                 {
-                    //set the string terminating NULL byte on the end
-                    //of the data read
-                    buffer[valread] = '\0';
-                    send(sd, buffer, strlen(buffer), 0);
+                    switch (client_parameter[i].Status)
+                    {
+                    case Connected:
+                        buffer[valread] = '\0';
+                        client_parameter[i].File = malloc(strlen(parameters->Folder) + strlen(buffer) + 1);
+                        strcpy(client_parameter[i].File, parameters->Folder);
+                        strcat(client_parameter[i].File, (const char*)buffer);
+                        send(socket_descriptor, buffer, strlen(buffer), 0);
+                        client_parameter[i].Status = FileNameReceived;
+                        memset(buffer, 0, sizeof(buffer));
+                        break;
+
+                    case FileNameReceived:
+                        client_parameter[i].FileSize += strlen(buffer);
+                        append_data_file(client_parameter[i].File, buffer);
+                        memset(buffer, 0, sizeof(buffer));
+                        break;
+
+                    default:
+                        break;
+                    }
                 }
             }
         }
     }
 
     return 0;
+}
+
+void initialize_client_sockets(ClientParameters client_socket[])
+{
+    int i;
+    for (i = 0; i < MAX_CLIENTS; i++)
+    {
+        client_socket[i].Socket = 0;
+        client_socket[i].Status = Disconnected;
+        client_socket[i].FileSize = 0;
+    }
+}
+
+void bind_socket_listener(ConnectionParameters* parameters, int master_socket, struct sockaddr_in* address)
+{
+    static struct in_addr ip_address;
+
+    inet_aton(parameters->ListeningIp, &ip_address);
+
+    address->sin_family = AF_INET;
+    address->sin_addr = ip_address;
+    address->sin_port = htons(parameters->ListeningPort);
+
+    if (bind(master_socket, (struct sockaddr*)address, sizeof(struct sockaddr_in)) < 0)
+    {
+        perror("bind failed");
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Listener on port %d \n", parameters->ListeningPort);
+}
+
+void append_data_file(const char* filename, const char* data)
+{
+    FILE* file;
+    file = fopen(filename, "a+");
+
+    fwrite(data, 1, strlen(data), file);
+
+    fclose(file);
 }
